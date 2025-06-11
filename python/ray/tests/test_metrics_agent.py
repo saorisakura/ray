@@ -165,14 +165,8 @@ _METRICS.append("ray_health_check_rpc_latency_ms_sum")
 
 @pytest.fixture
 def _setup_cluster_for_test(request, ray_start_cluster):
-    (
-        enable_metrics_collection,
-        experimental_enable_open_telemetry_on_agent,
-    ) = request.param
+    enable_metrics_collection = request.param
     NUM_NODES = 2
-    os.environ["RAY_experimental_enable_open_telemetry_on_agent"] = (
-        "1" if experimental_enable_open_telemetry_on_agent else "0"
-    )
     cluster = ray_start_cluster
     # Add a head node.
     cluster.add_node(
@@ -260,9 +254,7 @@ def _setup_cluster_for_test(request, ray_start_cluster):
 
 
 @pytest.mark.skipif(prometheus_client is None, reason="Prometheus not installed")
-@pytest.mark.parametrize(
-    "_setup_cluster_for_test", [(True, True), (True, False)], indirect=True
-)
+@pytest.mark.parametrize("_setup_cluster_for_test", [True], indirect=True)
 def test_metrics_export_end_to_end(_setup_cluster_for_test):
     TEST_TIMEOUT_S = 30
     (
@@ -290,16 +282,28 @@ def test_metrics_export_end_to_end(_setup_cluster_for_test):
         assert any(
             "core_worker" in components for components in components_dict.values()
         )
+        # The list of custom or user defined metrics. Open Telemetry backend does not
+        # support exporting Counter as Gauge, so we skip some metrics in that case.
+        custom_metrics = (
+            [
+                "test_counter",
+                "test_counter_total",
+                "test_histogram_bucket",
+                "test_driver_counter",
+                "test_driver_counter_total",
+                "test_gauge",
+            ]
+            if os.environ.get("RAY_experimental_enable_open_telemetry_on_core") != "1"
+            else [
+                "test_counter_total",
+                "test_histogram_bucket",
+                "test_driver_counter_total",
+                "test_gauge",
+            ]
+        )
 
         # Make sure our user defined metrics exist and have the correct types
-        for metric_name in [
-            "test_counter",
-            "test_counter_total",
-            "test_histogram_bucket",
-            "test_driver_counter",
-            "test_driver_counter_total",
-            "test_gauge",
-        ]:
+        for metric_name in custom_metrics:
             metric_name = f"ray_{metric_name}"
             assert metric_name in metric_names
             if metric_name.endswith("_total"):
@@ -586,7 +590,11 @@ def test_operation_stats(monkeypatch, shutdown_only):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Not working in Windows.")
-def test_counter(shutdown_only):
+@pytest.mark.skipif(
+    os.environ.get("RAY_experimental_enable_open_telemetry_on_core") == "1",
+    reason="OpenTelemetry backend does not support Counter exported as gauge.",
+)
+def test_counter_exported_as_gauge(shutdown_only):
     # Test to make sure Counter emits the right Prometheus metrics
     context = ray.init()
 
@@ -637,7 +645,7 @@ def test_counter(shutdown_only):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Not working in Windows.")
-def test_counter_without_export_counter_as_gauge(monkeypatch, shutdown_only):
+def test_counter(monkeypatch, shutdown_only):
     # Test to make sure we don't export counter as gauge
     # if RAY_EXPORT_COUNTER_AS_GAUGE is 0
     monkeypatch.setenv("RAY_EXPORT_COUNTER_AS_GAUGE", "0")
@@ -1026,7 +1034,7 @@ def test_custom_metrics_validation(shutdown_only):
         metric.inc(1.0, {"a": 1})
 
 
-@pytest.mark.parametrize("_setup_cluster_for_test", [(False, False)], indirect=True)
+@pytest.mark.parametrize("_setup_cluster_for_test", [False], indirect=True)
 def test_metrics_disablement(_setup_cluster_for_test):
     """Make sure the metrics are not exported when it is disabled."""
     prom_addresses, autoscaler_export_addr, _ = _setup_cluster_for_test
